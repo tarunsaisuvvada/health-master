@@ -15,7 +15,9 @@ Stop: Ctrl-C in the start.sh terminal stops both servers.
 
 ## Rules
 
-- Never commit or print `backend/.env` or anything in `backend/tokens/`: they hold the OAuth client secret and the parents' Google tokens.
+- Never commit or print `backend/.env`, `backend/tokens/` or `backend/data/`: they hold the OAuth client secret, the parents' Google tokens and their health data.
+- Health data is cached in `backend/data/<email>.json`. New data comes from Google only when the user clicks **Refresh** (or on an account's first view).
+- This app must run on the user's own computer: Google only allows the `http://localhost:8000/auth/callback` redirect. Running it on a cloud server needs a new redirect URI and HTTPS.
 - Only Gmail addresses added as **Test users** in the Google Cloud Console (Google Auth Platform → Audience) can sign in. A "403 access_denied" from Google means the account is not a test user.
 - Sign-ins expire every 7 days while the OAuth app is in Testing mode; the dashboard then asks to sign in again.
 - Tests: `cd backend && .venv/bin/python -m pytest -q`. Frontend check: `npm --prefix web run build`.

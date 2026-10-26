@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,8 @@ os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")  # Google reorders/adds
 BASE = Path(__file__).parent
 TOKENS = BASE / "tokens"
 TOKENS.mkdir(mode=0o700, exist_ok=True)
+DATA = BASE / "data"  # fetched days per account, merged on every refresh
+DATA.mkdir(mode=0o700, exist_ok=True)
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
 SCOPES = [
     "openid",
@@ -191,10 +194,58 @@ def me(request: Request):
     return {"email": email, "profiles": [DEMO_EMAIL] if DEMO else profiles()}
 
 
+def cache_path(profile):
+    if profile not in profiles():
+        raise HTTPException(404, "Unknown profile")
+    return DATA / f"{profile}.json"
+
+
+def load_cache(profile):
+    path = cache_path(profile)
+    return json.loads(path.read_text()) if path.exists() else {"days": {}, "fetched_at": None, "errors": []}
+
+
+def cached_view(profile, days, cache):
+    start = datetime.now().date() - timedelta(days=days - 1)
+    dates = [(start + timedelta(days=i)).isoformat() for i in range(days)]
+    return {"profile": profile, "days": [{"date": d, **cache["days"].get(d, {})} for d in dates],
+            "errors": cache["errors"], "fetched_at": cache["fetched_at"]}
+
+
+def refresh_cache(profile, days):
+    fresh = fetch_health(profile, days)
+    cache = load_cache(profile)
+    for day in fresh["days"]:
+        date = day.pop("date")
+        if day:  # never overwrite stored history with an empty fetch
+            cache["days"][date] = day
+    cache["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    cache["errors"] = fresh["errors"]
+    tmp = cache_path(profile).with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, indent=1, sort_keys=True))
+    tmp.chmod(0o600)
+    tmp.replace(cache_path(profile))
+    return cache
+
+
 @app.get("/api/health")
 def health(request: Request, profile: str | None = None, days: int = 7):
     email = current_email(request)
     days = max(1, min(days, 30))
     if DEMO:
         return demo_health(DEMO_EMAIL, days)
-    return fetch_health(profile or email, days)
+    profile = profile or email
+    cache = load_cache(profile)
+    if cache["fetched_at"] is None:  # first view of this account: fetch once
+        cache = refresh_cache(profile, 30)
+    return cached_view(profile, days, cache)
+
+
+@app.post("/api/refresh")
+def refresh(request: Request, profile: str | None = None, days: int = 7):
+    email = current_email(request)
+    days = max(1, min(days, 30))
+    if DEMO:
+        return {**demo_health(DEMO_EMAIL, days), "fetched_at": datetime.now(timezone.utc).isoformat()}
+    profile = profile or email
+    return cached_view(profile, days, refresh_cache(profile, days))

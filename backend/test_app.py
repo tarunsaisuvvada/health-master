@@ -83,6 +83,26 @@ def test_unknown_profile_is_404():
     assert signed_in_client().get("/api/health?profile=../app").status_code == 404
 
 
+def test_cache_fetches_once_and_keeps_history(tmp_path):
+    (tmp_path / "mom@gmail.com.json").write_text("{}")
+    today = datetime.now().date().isoformat()
+    responses = [
+        {"profile": "mom@gmail.com", "days": [{"date": today, "steps": 500}], "errors": []},
+        {"profile": "mom@gmail.com", "days": [{"date": today}], "errors": []},  # Google returns nothing
+    ]
+    (tmp_path / "data").mkdir()
+    with patch.object(m, "TOKENS", tmp_path), patch.object(m, "DATA", tmp_path / "data"), \
+         patch.object(m, "fetch_health", side_effect=responses) as fetch:
+        c = signed_in_client()
+        first = c.get("/api/health?profile=mom@gmail.com").json()
+        second = c.get("/api/health?profile=mom@gmail.com").json()
+        refreshed = c.post("/api/refresh?profile=mom@gmail.com").json()
+    assert fetch.call_count == 2  # first view + explicit refresh, not the second view
+    assert first["days"][-1]["steps"] == second["days"][-1]["steps"] == 500
+    assert refreshed["days"][-1]["steps"] == 500  # empty fetch kept stored history
+    assert refreshed["fetched_at"]
+
+
 def test_expired_google_sign_in_returns_clear_error(tmp_path):
     (tmp_path / "mom@gmail.com.json").write_text("{}")
     with patch.object(m, "TOKENS", tmp_path), \

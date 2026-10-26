@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 type Day = { date: string; steps?: number; sleep_hours?: number; avg_hr?: number; min_hr?: number; active_minutes?: number };
-type Health = { profile: string; days: Day[]; errors: string[] };
+type Health = { profile: string; days: Day[]; errors: string[]; fetched_at: string | null };
 
 const show = (v: number | undefined, unit = "") => (v === undefined ? "–" : `${v.toLocaleString()}${unit}`);
 
@@ -18,6 +18,7 @@ export default function Dashboard() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState<Health | null>(null);
   const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     fetch("/api/me")
@@ -49,6 +50,20 @@ export default function Dashboard() {
     };
   }, [profile, days]);
 
+  async function refresh() {
+    setRefreshing(true);
+    setError("");
+    try {
+      const r = await fetch(`/api/refresh?profile=${encodeURIComponent(profile)}&days=${days}`, { method: "POST" });
+      if (r.ok) setData(await r.json());
+      else setError(await errorText(r));
+    } catch {
+      setError("Cannot reach the backend. Is it running on port 8000?");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   async function logout() {
     await fetch("/auth/logout", { method: "POST" });
     window.location.href = "/";
@@ -67,6 +82,9 @@ export default function Dashboard() {
           <select aria-label="Range" value={days} onChange={(e) => setDays(Number(e.target.value))}>
             {[7, 14, 30].map((d) => <option key={d} value={d}>Last {d} days</option>)}
           </select>
+          <button className="btn" onClick={refresh} disabled={refreshing || !profile}>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
           <a className="btn ghost" href="/auth/login">+ Add account</a>
           <button className="btn ghost" onClick={logout}>Log out</button>
         </div>
@@ -77,6 +95,9 @@ export default function Dashboard() {
 
       {data && (
         <>
+          <p className="muted" style={{ marginTop: 0 }}>
+            {data.fetched_at ? `Last updated from Google ${new Date(data.fetched_at).toLocaleString()}` : "Not fetched from Google yet"}
+          </p>
           <div className="grid">
             <div className="card stat"><div className="label muted">Steps today</div><div className="value">{show(today?.steps)}</div></div>
             <div className="card stat"><div className="label muted">Sleep last night</div><div className="value">{show(today?.sleep_hours, " h")}</div></div>

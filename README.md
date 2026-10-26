@@ -2,7 +2,8 @@
 
 Local dashboard for a parent's Google Fit data: steps, sleep, heart rate, active minutes.
 
-- `backend/`: FastAPI on port 8000. Handles Google sign-in, stores tokens in `backend/tokens/`, serves `/api/me` and `/api/health`.
+- `backend/`: FastAPI on port 8000. Handles Google sign-in, stores tokens in `backend/tokens/`, serves `/api/me`, `/api/health` and `/api/refresh`.
+- Fetched data is saved per account in `backend/data/<email>.json` and builds up over time. The dashboard reads from that file; Google is only called on an account's first view or when you click **Refresh**.
 - `web/`: Next.js on port 3000. Login page and dashboard. Proxies `/api/*` and `/auth/*` to the backend.
 
 ## Admin (one time, Google Cloud Console)
