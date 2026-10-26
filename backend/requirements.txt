@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+itsdangerous
+python-dotenv
+requests
+google-auth-oauthlib
