@@ -1,5 +1,5 @@
+import json
 import os
-import time
 
 os.environ["SESSION_SECRET"] = "x" * 32
 os.environ["GOOGLE_CLIENT_ID"] = "test-client"
@@ -9,57 +9,38 @@ os.environ["DEMO"] = "0"
 from datetime import datetime
 from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 from google.auth.exceptions import RefreshError
 
 import app as m
 
-client = TestClient(m.app, base_url="http://localhost:8000")
+
+def civil(y, mo, d):
+    return {"date": {"year": y, "month": mo, "day": d}}
 
 
-def ms(y, mo, d, h=0):
-    return str(int(datetime(y, mo, d, h).timestamp() * 1000))
+def test_merge_rollup_steps_hr_active_minutes():
+    rows = {"2026-10-25": {}}
+    m.merge_rollup(rows, {"rollupDataPoints": [
+        {"civilStartTime": civil(2026, 10, 25), "steps": {"countSum": "4200"}},
+        {"civilStartTime": civil(2026, 10, 25),
+         "heartRate": {"beatsPerMinuteAvg": 72.4, "beatsPerMinuteMax": 110, "beatsPerMinuteMin": 58.6}},
+        {"civilStartTime": civil(2026, 10, 25), "activeMinutes": {"activeMinutesRollupByActivityLevel": [
+            {"activityLevel": "LIGHT", "activeMinutesSum": "20"}, {"activityLevel": "VIGOROUS", "activeMinutesSum": "10"}]}},
+        {"civilStartTime": civil(2026, 9, 1), "steps": {"countSum": "1"}},  # outside range: ignored
+    ]})
+    assert rows == {"2026-10-25": {"steps": 4200, "avg_hr": 72, "min_hr": 59, "active_minutes": 30}}
 
 
-def test_merge_buckets_steps_and_hr():
-    day = m.local_day(ms(2026, 10, 25, 12))
-    rows = {day: {}}
-    m.merge_buckets(rows, "steps", {"bucket": [{"startTimeMillis": ms(2026, 10, 25), "dataset": [
-        {"point": [{"value": [{"intVal": 3000}]}, {"value": [{"intVal": 1200}]}]}]}]})
-    m.merge_buckets(rows, "heart_rate", {"bucket": [{"startTimeMillis": ms(2026, 10, 25), "dataset": [
-        {"point": [{"value": [{"fpVal": 72.4}, {"fpVal": 110}, {"fpVal": 58.6}]}]}]}]})
-    assert rows[day] == {"steps": 4200, "avg_hr": 72, "min_hr": 59}
-
-
-def test_merge_sleep_counts_on_wake_day():
-    day = m.local_day(ms(2026, 10, 25))
-    rows = {day: {}}
-    m.merge_sleep(rows, {"session": [{"startTimeMillis": ms(2026, 10, 24, 23), "endTimeMillis": ms(2026, 10, 25, 6)}]})
-    assert rows[day] == {"sleep_hours": 7.0}
-
-
-@pytest.fixture
-def los_angeles():
-    old = os.environ.get("TZ")
-    os.environ["TZ"] = "America/Los_Angeles"
-    time.tzset()
-    yield
-    if old is None:
-        os.environ.pop("TZ")
-    else:
-        os.environ["TZ"] = old
-    time.tzset()
-
-
-def test_bucket_after_dst_end_keeps_its_date(los_angeles):
-    # clocks go back 2026-11-01; the 24h bucket for Nov 2 starts at 23:00 on Nov 1
-    start = int(datetime(2026, 10, 31).timestamp() * 1000)
-    rows = {"2026-10-31": {}, "2026-11-01": {}, "2026-11-02": {}}
-    buckets = [{"startTimeMillis": str(start + i * m.DAY_MS), "dataset": [{"point": [{"value": [{"intVal": i + 1}]}]}]}
-               for i in range(3)]
-    m.merge_buckets(rows, "steps", {"bucket": buckets})
-    assert [r["steps"] for r in rows.values()] == [1, 2, 3]
+def test_merge_points_sleep_on_wake_day_and_resting_hr():
+    rows = {"2026-10-25": {}}
+    m.merge_points(rows, {"dataPoints": [
+        {"sleep": {"interval": {"civilStartTime": civil(2026, 10, 24), "civilEndTime": civil(2026, 10, 25)},
+                   "summary": {"minutesAsleep": "390"}}},
+        {"sleep": {"interval": {"civilEndTime": civil(2026, 10, 25)}, "summary": {"minutesAsleep": "30"}}},  # nap
+        {"dailyRestingHeartRate": {"date": {"year": 2026, "month": 10, "day": 25}, "beatsPerMinute": "61"}},
+    ]})
+    assert rows == {"2026-10-25": {"sleep_hours": 7.0, "resting_hr": 61}}
 
 
 def test_api_requires_sign_in():
@@ -83,14 +64,22 @@ def test_unknown_profile_is_404():
     assert signed_in_client().get("/api/health?profile=../app").status_code == 404
 
 
+def test_old_fit_only_sign_in_asks_to_sign_in_again(tmp_path):
+    (tmp_path / "mom@gmail.com.json").write_text(json.dumps({"scopes": ["openid"]}))
+    with patch.object(m, "TOKENS", tmp_path):
+        r = signed_in_client().post("/api/refresh?profile=mom@gmail.com")
+    assert r.status_code == 409
+    assert "sign in again" in r.json()["detail"]
+
+
 def test_cache_fetches_once_and_keeps_history(tmp_path):
     (tmp_path / "mom@gmail.com.json").write_text("{}")
+    (tmp_path / "data").mkdir()
     today = datetime.now().date().isoformat()
     responses = [
         {"profile": "mom@gmail.com", "days": [{"date": today, "steps": 500}], "errors": []},
         {"profile": "mom@gmail.com", "days": [{"date": today}], "errors": []},  # Google returns nothing
     ]
-    (tmp_path / "data").mkdir()
     with patch.object(m, "TOKENS", tmp_path), patch.object(m, "DATA", tmp_path / "data"), \
          patch.object(m, "fetch_health", side_effect=responses) as fetch:
         c = signed_in_client()
@@ -104,11 +93,12 @@ def test_cache_fetches_once_and_keeps_history(tmp_path):
 
 
 def test_expired_google_sign_in_returns_clear_error(tmp_path):
-    (tmp_path / "mom@gmail.com.json").write_text("{}")
-    with patch.object(m, "TOKENS", tmp_path), \
+    (tmp_path / "mom@gmail.com.json").write_text(json.dumps({"scopes": m.SCOPES}))
+    (tmp_path / "data").mkdir()
+    with patch.object(m, "TOKENS", tmp_path), patch.object(m, "DATA", tmp_path / "data"), \
          patch.object(m.Credentials, "from_authorized_user_file"), \
          patch.object(m, "AuthorizedSession") as session:
-        session.return_value.post.side_effect = RefreshError("invalid_grant")
+        session.return_value.request.side_effect = RefreshError("invalid_grant")
         r = signed_in_client().get("/api/health?profile=mom@gmail.com")
     assert r.status_code == 409
-    assert "sign in again" in r.json()["detail"]
+    assert "expired" in r.json()["detail"]

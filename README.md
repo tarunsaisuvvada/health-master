@@ -1,6 +1,6 @@
 # Parent Health
 
-Local dashboard for a parent's Google Fit data: steps, sleep, heart rate, active minutes.
+Local dashboard for a parent's Fitbit / Google Health data: steps, sleep, resting and average heart rate, active minutes. Data comes from the [Google Health API](https://developers.google.com/health), the successor to the Fitbit Web API.
 
 - `backend/`: FastAPI on port 8000. Handles Google sign-in, stores tokens in `backend/tokens/`, serves `/api/me`, `/api/health` and `/api/refresh`.
 - Fetched data is saved per account in `backend/data/<email>.json` and builds up over time. The dashboard reads from that file; Google is only called on an account's first view or when you click **Refresh**.
@@ -8,7 +8,7 @@ Local dashboard for a parent's Google Fit data: steps, sleep, heart rate, active
 
 ## Admin (one time, Google Cloud Console)
 
-1. **APIs & Services → Library:** enable the **Fitness API**.
+1. **APIs & Services → Library:** enable the **Google Health API** (`health.googleapis.com`).
 2. **Credentials:** the OAuth client must be type **Web application**, with this authorized redirect URI:
    `http://localhost:8000/auth/callback`
 3. **OAuth consent screen → Test users:** add each Gmail address that will sign in.
@@ -35,7 +35,8 @@ Never commit `.env` or `tokens/`: they hold the client secret and the parents' a
 
 ## Known limits
 
-- **Google Fit API is being shut down in 2026** and has not accepted new projects since May 2024. If your Cloud project did not use it before then, Fit calls may fail. Google's replacement is Health Connect (Android, on-device) or the Google Health API.
+- **Google shows an "unverified app" warning** at sign-in, because the Google Health permissions are restricted and the app is not verified. Test users click **Advanced → Go to Health Master** to continue.
+- Accounts signed in before the switch from Google Fit must sign in again with **+ Add account** to grant the Google Health permissions; the dashboard says so.
 - **Sign-in expires every 7 days** while the OAuth app is in Testing mode. The dashboard then says so; click **+ Add account** and sign in with that parent's account again.
 - Days are counted in this computer's timezone, not the parent's.
 

@@ -1,6 +1,6 @@
 # Parent Health: instructions for Claude
 
-Local dashboard for a parent's Google Fit data. FastAPI backend in `backend/` (port 8000), Next.js frontend in `web/` (port 3000). See README.md for the full picture.
+Local dashboard for a parent's Fitbit / Google Health data, read from the Google Health API (`health.googleapis.com/v4`). FastAPI backend in `backend/` (port 8000), Next.js frontend in `web/` (port 3000). See README.md for the full picture.
 
 ## When the user says "start" (or "run", "open the app")
 

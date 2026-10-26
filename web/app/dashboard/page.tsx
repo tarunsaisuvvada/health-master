@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from "react";
 
-type Day = { date: string; steps?: number; sleep_hours?: number; avg_hr?: number; min_hr?: number; active_minutes?: number };
+type Day = {
+  date: string;
+  steps?: number;
+  sleep_hours?: number;
+  avg_hr?: number;
+  min_hr?: number;
+  resting_hr?: number;
+  active_minutes?: number;
+};
 type Health = { profile: string; days: Day[]; errors: string[]; fetched_at: string | null };
 
 const show = (v: number | undefined, unit = "") => (v === undefined ? "–" : `${v.toLocaleString()}${unit}`);
@@ -101,18 +109,18 @@ export default function Dashboard() {
           <div className="grid">
             <div className="card stat"><div className="label muted">Steps today</div><div className="value">{show(today?.steps)}</div></div>
             <div className="card stat"><div className="label muted">Sleep last night</div><div className="value">{show(today?.sleep_hours, " h")}</div></div>
-            <div className="card stat"><div className="label muted">Lowest heart rate</div><div className="value">{show(today?.min_hr, " bpm")}</div></div>
+            <div className="card stat"><div className="label muted">Resting heart rate</div><div className="value">{show(today?.resting_hr ?? today?.min_hr, " bpm")}</div></div>
             <div className="card stat"><div className="label muted">Active minutes</div><div className="value">{show(today?.active_minutes)}</div></div>
           </div>
 
           <div className="card table-wrap">
             <table>
-              <thead><tr><th>Date</th><th>Steps</th><th>Sleep (h)</th><th>Avg HR</th><th>Low HR</th><th>Active min</th></tr></thead>
+              <thead><tr><th>Date</th><th>Steps</th><th>Sleep (h)</th><th>Resting HR</th><th>Avg HR</th><th>Low HR</th><th>Active min</th></tr></thead>
               <tbody>
                 {[...data.days].reverse().map((d) => (
                   <tr key={d.date}>
                     <td>{d.date}</td><td>{show(d.steps)}</td><td>{show(d.sleep_hours)}</td>
-                    <td>{show(d.avg_hr)}</td><td>{show(d.min_hr)}</td><td>{show(d.active_minutes)}</td>
+                    <td>{show(d.resting_hr)}</td><td>{show(d.avg_hr)}</td><td>{show(d.min_hr)}</td><td>{show(d.active_minutes)}</td>
                   </tr>
                 ))}
               </tbody>

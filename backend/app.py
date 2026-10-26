@@ -26,17 +26,12 @@ REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
 SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/fitness.activity.read",
-    "https://www.googleapis.com/auth/fitness.heart_rate.read",
-    "https://www.googleapis.com/auth/fitness.sleep.read",
+    "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+    "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
+    "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
 ]
-FIT = "https://www.googleapis.com/fitness/v1/users/me"
-DAY_MS = 86_400_000
-METRICS = [
-    ("steps", "com.google.step_count.delta"),
-    ("active_minutes", "com.google.active_minutes"),
-    ("heart_rate", "com.google.heart_rate.bpm"),
-]
+HEALTH = "https://health.googleapis.com/v4/users/me/dataTypes"
+ROLLUP_MAX_DAYS = 14  # dailyRollUp limit for heart-rate and active-minutes
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 DEMO = os.getenv("DEMO") == "1"  # sample data, no Google sign-in
@@ -65,66 +60,85 @@ def profiles():
     return sorted(p.stem for p in TOKENS.glob("*.json"))
 
 
-def local_day(ms):
-    return datetime.fromtimestamp(int(ms) / 1000).date().isoformat()
+def civil(d):
+    return {"date": {"year": d.year, "month": d.month, "day": d.day}}
 
 
-def rfc3339(ms):
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def day_key(civil_dt):
+    d = civil_dt["date"]
+    return f"{d['year']:04d}-{d['month']:02d}-{d['day']:02d}"
 
 
-def merge_buckets(rows, key, resp):
-    for bucket in resp.get("bucket", []):
-        # label by bucket midpoint: after a DST shift buckets start at 23:00 or 01:00
-        day = local_day(int(bucket["startTimeMillis"]) + DAY_MS // 2)
-        points = [p for ds in bucket.get("dataset", []) for p in ds.get("point", [])]
-        if not points or day not in rows:
+def merge_rollup(rows, resp):
+    for p in resp.get("rollupDataPoints", []):
+        day = day_key(p["civilStartTime"])
+        if day not in rows:
             continue
-        if key == "heart_rate":  # summary point values: [avg, max, min]
-            rows[day]["avg_hr"] = round(sum(p["value"][0]["fpVal"] for p in points) / len(points))
-            rows[day]["min_hr"] = round(min(p["value"][2]["fpVal"] for p in points))
-        else:
-            rows[day][key] = sum(p["value"][0].get("intVal", 0) for p in points)
+        if "steps" in p:
+            rows[day]["steps"] = int(p["steps"].get("countSum", 0))
+        if "heartRate" in p:
+            rows[day]["avg_hr"] = round(p["heartRate"]["beatsPerMinuteAvg"])
+            rows[day]["min_hr"] = round(p["heartRate"]["beatsPerMinuteMin"])
+        if "activeMinutes" in p:
+            levels = p["activeMinutes"].get("activeMinutesRollupByActivityLevel", [])
+            rows[day]["active_minutes"] = sum(int(l.get("activeMinutesSum", 0)) for l in levels)
 
 
-def merge_sleep(rows, resp):
-    for s in resp.get("session", []):
-        day = local_day(s["endTimeMillis"])  # count sleep on the day they woke up
-        if day in rows:
-            hours = (int(s["endTimeMillis"]) - int(s["startTimeMillis"])) / 3_600_000
-            rows[day]["sleep_hours"] = round(rows[day].get("sleep_hours", 0) + hours, 1)
+def merge_points(rows, resp):
+    for p in resp.get("dataPoints", []):
+        if "sleep" in p:  # count sleep on the day they woke up
+            day = day_key(p["sleep"]["interval"]["civilEndTime"])
+            minutes = int(p["sleep"].get("summary", {}).get("minutesAsleep", 0))
+            if day in rows and minutes:
+                rows[day]["sleep_hours"] = round(rows[day].get("sleep_hours", 0) + minutes / 60, 1)
+        elif "dailyRestingHeartRate" in p:
+            r = p["dailyRestingHeartRate"]
+            day = day_key({"date": r["date"]})
+            if day in rows:
+                rows[day]["resting_hr"] = int(r["beatsPerMinute"])
 
 
 def fetch_health(profile, days):
     if profile not in profiles():
         raise HTTPException(404, "Unknown profile")
-    creds = Credentials.from_authorized_user_file(TOKENS / f"{profile}.json", SCOPES)
-    api = AuthorizedSession(creds)
-    start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = start_ms + days * DAY_MS
-    rows = {(start + timedelta(days=i)).date().isoformat(): {} for i in range(days)}
+    token_file = TOKENS / f"{profile}.json"
+    if not set(SCOPES) <= set(json.loads(token_file.read_text()).get("scopes", [])):
+        raise HTTPException(409, f"{profile} needs to sign in again to allow Google Health access. Click + Add account.")
+    api = AuthorizedSession(Credentials.from_authorized_user_file(token_file, SCOPES))
+    start = datetime.now().date() - timedelta(days=days - 1)
+    rows = {(start + timedelta(days=i)).isoformat(): {} for i in range(days)}
+    end = start + timedelta(days=days)
     errors = []
 
-    try:
-        for key, dtype in METRICS:
-            r = api.post(f"{FIT}/dataset:aggregate", json={
-                "aggregateBy": [{"dataTypeName": dtype}],
-                "bucketByTime": {"durationMillis": DAY_MS},
-                "startTimeMillis": start_ms,
-                "endTimeMillis": end_ms,
-            })
-            if r.ok:
-                merge_buckets(rows, key, r.json())
-            else:
-                errors.append(f"{key}: {r.status_code} {r.text[:200]}")
+    def call(label, method, url, **kwargs):
+        r = api.request(method, url, **kwargs)
+        if not r.ok:
+            errors.append(f"{label}: {r.status_code} {r.text[:200]}")
+            return {}
+        return r.json()
 
-        r = api.get(f"{FIT}/sessions", params={
-            "activityType": 72, "startTime": rfc3339(start_ms), "endTime": rfc3339(end_ms)})
-        if r.ok:
-            merge_sleep(rows, r.json())
-        else:
-            errors.append(f"sleep: {r.status_code} {r.text[:200]}")
+    try:
+        for dtype in ("steps", "heart-rate", "active-minutes"):
+            chunk = start
+            while chunk < end:
+                chunk_end = min(chunk + timedelta(days=ROLLUP_MAX_DAYS), end)
+                merge_rollup(rows, call(dtype, "POST", f"{HEALTH}/{dtype}/dataPoints:dailyRollUp", json={
+                    "range": {"start": civil(chunk), "end": civil(chunk_end)}, "windowSizeDays": 1}))
+                chunk = chunk_end
+
+        sleep_filter = (f'sleep.interval.civil_end_time >= "{start.isoformat()}" '
+                        f'AND sleep.interval.civil_end_time < "{end.isoformat()}"')
+        page = {"filter": sleep_filter, "pageSize": 25}
+        while True:
+            resp = call("sleep", "GET", f"{HEALTH}/sleep/dataPoints", params=page)
+            merge_points(rows, resp)
+            if not resp.get("nextPageToken"):
+                break
+            page["pageToken"] = resp["nextPageToken"]
+
+        # newest first; one point per day, so days + a margin covers the range
+        merge_points(rows, call("resting heart rate", "GET", f"{HEALTH}/daily-resting-heart-rate/dataPoints",
+                                params={"pageSize": days + 7}))
     except RefreshError:
         # Testing-mode OAuth apps get refresh tokens that expire after 7 days
         raise HTTPException(409, f"Google sign-in for {profile} has expired. Click + Add account and sign in again.")
@@ -135,7 +149,7 @@ def fetch_health(profile, days):
 def demo_health(profile, days):
     start = datetime.now().date() - timedelta(days=days - 1)
     rows = [{"date": (start + timedelta(days=i)).isoformat(), "steps": 3000 + (i * 977) % 5000,
-             "sleep_hours": round(6 + (i * 0.7) % 2.5, 1), "avg_hr": 70 + i % 6, "min_hr": 56 + i % 5,
+             "sleep_hours": round(6 + (i * 0.7) % 2.5, 1), "avg_hr": 70 + i % 6, "min_hr": 56 + i % 5, "resting_hr": 60 + i % 4,
              "active_minutes": 15 + (i * 13) % 40} for i in range(days)]
     return {"profile": profile, "days": rows, "errors": []}
 
