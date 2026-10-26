@@ -17,7 +17,9 @@ const show = (v: number | undefined, unit = "") => (v === undefined ? "–" : `$
 
 async function errorText(r: Response) {
   const body = await r.json().catch(() => null);
-  return body?.detail ?? `Request failed (${r.status})`;
+  if (body?.detail) return body.detail;
+  if (!body && r.status >= 500) return `Cannot reach the backend on port 8000 (${r.status}). Is it running? Restart with ./start.sh.`;
+  return `Request failed (${r.status})`;
 }
 
 export default function Dashboard() {
@@ -27,6 +29,7 @@ export default function Dashboard() {
   const [data, setData] = useState<Health | null>(null);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     fetch("/api/me")
@@ -78,16 +81,35 @@ export default function Dashboard() {
   }
 
   const today = data?.days.at(-1);
+  const errors = [error, ...(data?.errors ?? [])].filter(Boolean);
+
+  async function copyErrors() {
+    const report = [
+      "Parent Health error report",
+      `Time: ${new Date().toString()}`,
+      `Account: ${profile || "(none)"}`,
+      `Range: last ${days} days`,
+      `Last updated from Google: ${data?.fetched_at ?? "never"}`,
+      ...errors.map((e) => `- ${e}`),
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(report);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      window.prompt("Copy this error report:", report);
+    }
+  }
 
   return (
     <>
       <header>
         <h1 style={{ margin: 0 }}>Parent Health</h1>
         <div className="controls">
-          <select aria-label="Account" value={profile} onChange={(e) => setProfile(e.target.value)}>
+          <select aria-label="Account" autoComplete="off" value={profile} onChange={(e) => setProfile(e.target.value)}>
             {profiles.map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
-          <select aria-label="Range" value={days} onChange={(e) => setDays(Number(e.target.value))}>
+          <select aria-label="Range" autoComplete="off" value={days} onChange={(e) => setDays(Number(e.target.value))}>
             {[7, 14, 30].map((d) => <option key={d} value={d}>Last {d} days</option>)}
           </select>
           <button className="btn" onClick={refresh} disabled={refreshing || !profile}>
@@ -98,7 +120,14 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {error && <p className="error">{error}</p>}
+      {errors.length > 0 && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <strong>Something went wrong</strong>
+          {errors.map((e) => <p key={e} className="error">{e}</p>)}
+          <button className="btn ghost" onClick={copyErrors}>{copied ? "Copied" : "Copy error details"}</button>
+          <span className="muted" style={{ marginLeft: 12, fontSize: 14 }}>Send this to whoever set up the app.</span>
+        </div>
+      )}
       {!data && !error && <p className="muted">Loading…</p>}
 
       {data && (
@@ -126,13 +155,6 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
-
-          {data.errors.length > 0 && (
-            <div className="card" style={{ marginTop: 20 }}>
-              <strong>Some data could not be loaded</strong>
-              {data.errors.map((e) => <p key={e} className="error">{e}</p>)}
-            </div>
-          )}
         </>
       )}
     </>

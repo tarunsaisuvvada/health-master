@@ -113,7 +113,11 @@ def fetch_health(profile, days):
     def call(label, method, url, **kwargs):
         r = api.request(method, url, **kwargs)
         if not r.ok:
-            errors.append(f"{label}: {r.status_code} {r.text[:200]}")
+            try:
+                message = r.json()["error"]["message"]
+            except (ValueError, KeyError, TypeError):
+                message = r.text[:200]
+            errors.append(f"{label}: {r.status_code} {message}")
             return {}
         return r.json()
 
@@ -143,6 +147,8 @@ def fetch_health(profile, days):
         # Testing-mode OAuth apps get refresh tokens that expire after 7 days
         raise HTTPException(409, f"Google sign-in for {profile} has expired. Click + Add account and sign in again.")
 
+    if errors and all("not linked to Google Health" in e for e in errors):
+        errors = [f"{profile} has no Fitbit or Google Health data. Sign in with the Google account the Fitbit uses."]
     return {"profile": profile, "days": [{"date": d, **v} for d, v in rows.items()], "errors": errors}
 
 
